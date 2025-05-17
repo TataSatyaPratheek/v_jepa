@@ -1,6 +1,9 @@
 import os
 import sys
 import time
+import signal
+from datetime import datetime
+
 import logging
 import argparse
 from typing import Dict, Any, Optional, Tuple, List
@@ -30,6 +33,18 @@ from src.config.defaults import VJEPASystemConfig, get_default_config, apply_m1_
 
 # Configure enhanced colorful logger
 logger = configure_colorful_logger("train")
+
+# Add a graceful shutdown handler
+def setup_graceful_shutdown():
+    """Set up signal handlers for graceful shutdown."""
+    def handler(signum, frame):
+        print(f"\nReceived signal {signum}. Shutting down gracefully...")
+        # Perform any necessary cleanup here
+        # e.g., save one last checkpoint, close files, etc.
+        sys.exit(0) # Exit gracefully
+    
+    signal.signal(signal.SIGINT, handler)
+    signal.signal(signal.SIGTERM, handler)
 
 
 def parse_args():
@@ -240,41 +255,17 @@ def train_epoch(model: VJEPA,
                mask_generator: VideoMasker,
                epoch: int,
                config: VJEPASystemConfig,
+               progress_display: TrainingProgressDisplay, # Added
                writer: SummaryWriter,
                memory_monitor: MemoryMonitor):
-    """
-    Train model for one epoch.
-    
-    Args:
-        model: VJEPA model
-        loader: Data loader
-        optimizer: Optimizer
-        grad_accumulator: Gradient accumulator
-        device_manager: Device manager
-        mask_generator: Mask generator
-        epoch: Current epoch
-        config: System configuration
-        writer: TensorBoard writer
-        memory_monitor: Memory monitor
-    
-    Returns:
-        Dictionary of training metrics
-    """
+    """Train model for one epoch with better error handling."""
     model.train()
     device = device_manager.device
     
-    # Get AMP context and scaler if configured
-    amp_context = device_manager.get_amp_context(config.training.amp)
-    scaler = device_manager.get_grad_scaler(config.training.amp)
+    # Add timeout for loading data
+    loader_timeout = 30  # seconds
     
-    # Create progress display
-    progress_display = TrainingProgressDisplay(
-        total_epochs=config.training.epochs,
-        steps_per_epoch=len(loader),
-        metrics=['loss', 'lr', 'memory_mb', 'data_t_val', 'batch_t_val'],
-        use_rich=True  # Use Rich for fancy display
-    )
-    progress_display.start()
+    # Progress display is now passed in and started/stopped by the caller
     
     # Training statistics
     train_loss = 0.0
@@ -286,74 +277,93 @@ def train_epoch(model: VJEPA,
     start = time.time()
     end = time.time()
     
+    # Get AMP context and scaler
+    amp_context = device_manager.get_amp_context(config.training.amp)
+    
     # Log initial message
     logger.info(f"Starting epoch {epoch}/{config.training.epochs} with {len(loader)} steps")
-    logger.info(f"Batch size: {config.training.batch_size} × {config.optimizer.grad_accumulation_steps} (accumulation)")
-    
-    # Current learning rate
-    current_lr = optimizer.param_groups[0]['lr']
     
     # Iterate over batches
-    for i, batch in enumerate(loader):
-        # Measure data loading time
-        data_time.update(time.time() - end)
-        
-        # Move to device
-        if isinstance(batch, torch.Tensor):
-            batch = batch.to(device, non_blocking=True)
-        
-        # Apply masking (mask_generator is VideoMasker instance)
-        masked_batch, token_mask = mask_generator(batch) # token_mask is patch-level
-        
-        # Forward pass
-        with amp_context:
-            outputs = model(batch, masked_batch, token_mask)
-            loss = outputs["loss"]
-        
-        # Backward pass with gradient accumulation
-        grad_accumulator.backward(loss)
-        
-        # Update weights if accumulation is complete
-        if not grad_accumulator.is_accumulation_step:
-            grad_accumulator.step()
-            # Force memory cleanup after every backward+update
-            torch.cuda.empty_cache() if torch.cuda.is_available() else None
-            empty_cache(force_gc=True)
-            grad_accumulator.zero_grad(set_to_none=True)
-        
-        # Update metrics
-        batch_time.update(time.time() - end)
-        losses.update(loss.item())
-        
-        # Empty cache if configured
-        if i % config.training.empty_cache_freq == 0:
-            empty_cache(force_gc=True)  # Force garbage collection more aggressively
-        
-        # Update memory monitor
-        memory_info = memory_monitor.update()
-        memory_mb = memory_info.get("device_memory_mb", 0.0)
-        
-        # Update progress display
-        metrics = {
-            'loss': loss.item(),
-            'lr': current_lr,
-            'memory_mb': memory_mb,
-            'data_t_val': data_time.val,
-            'batch_t_val': batch_time.val
-        }
-        progress_display.update_display(epoch, i+1, metrics)
-        
-        # Log to TensorBoard
-        global_step = (epoch - 1) * len(loader) + i
-        writer.add_scalar('train/loss', losses.val, global_step)
-        writer.add_scalar('train/memory', memory_mb, global_step)
-        writer.add_scalar('train/batch_time', batch_time.val, global_step)
-        
-        # Reset end time
-        end = time.time()
-    
-    # Stop progress display
-    progress_display.stop()
+    try:
+        for i, batch in enumerate(loader):
+            # Check if loading is taking too long
+            curr_data_time = time.time() - end
+            if curr_data_time > loader_timeout:
+                logger.warning(f"Data loading timeout after {curr_data_time:.1f}s. Skipping batch.")
+                end = time.time()
+                continue
+            
+            # Measure data loading time
+            data_time.update(time.time() - end)
+            
+            try:
+                # Move batch to device (handle different batch types)
+                if isinstance(batch, torch.Tensor):
+                    batch = batch.to(device, non_blocking=True)
+                elif isinstance(batch, dict) and 'video' in batch:
+                    batch = batch['video'].to(device, non_blocking=True)
+                
+                # Apply masking 
+                masked_batch, token_mask = mask_generator(batch)
+                
+                # Forward pass with error handling
+                with amp_context:
+                    outputs = model(batch, masked_batch, token_mask)
+                    loss = outputs["loss"]
+                
+                # Skip bad loss values
+                if torch.isnan(loss) or torch.isinf(loss):
+                    logger.warning(f"Bad loss value: {loss.item()}. Skipping batch.")
+                    end = time.time()
+                    continue
+                
+                # Backward pass with gradient accumulation
+                grad_accumulator.backward(loss)
+                
+                # Update weights if accumulation is complete
+                if not grad_accumulator.is_accumulation_step:
+                    grad_accumulator.step()
+                    # Force memory cleanup
+                    empty_cache(force_gc=True)
+                    grad_accumulator.zero_grad(set_to_none=True)
+                
+                # Update metrics
+                batch_time.update(time.time() - end)
+                losses.update(loss.item())
+                
+                # Empty cache if configured
+                if i % config.training.empty_cache_freq == 0:
+                    empty_cache(force_gc=True)
+                
+                # Update memory monitor
+                memory_info = memory_monitor.update()
+                memory_mb = memory_info.get("device_memory_mb", 0.0)
+                
+                # Update progress display
+                metrics = {
+                    'loss': loss.item(),
+                    'lr': optimizer.param_groups[0]['lr'],
+                    'memory_mb': memory_mb,
+                    'data_time': data_time.val,
+                    'batch_time': batch_time.val
+                }
+                progress_display.update_display(epoch, i+1, metrics)
+                
+                # Log to TensorBoard
+                global_step = (epoch - 1) * len(loader) + i
+                writer.add_scalar('train/loss', loss.item(), global_step)
+                writer.add_scalar('train/memory', memory_mb, global_step)
+                
+            except Exception as e:
+                logger.error(f"Error processing batch {i}: {e}")
+                # Just skip this batch and continue
+                empty_cache(force_gc=True)
+            
+            # Reset end time
+            end = time.time()
+            
+    except Exception as e:
+        logger.error(f"Error during epoch {epoch}: {e}")
     
     # Calculate metrics
     metrics = {
@@ -362,11 +372,7 @@ def train_epoch(model: VJEPA,
         'memory': memory_monitor.peak_memory
     }
     
-    logger.info(
-        f"Epoch {epoch} completed in {metrics['time']:.2f}s. "
-        f"Loss: {metrics['loss']:.4f}, "
-        f"Peak memory: {metrics['memory']:.1f}MB"
-    )
+    logger.info(f"Epoch {epoch} completed in {metrics['time']:.2f}s. Loss: {metrics['loss']:.4f}, Memory: {metrics['memory']:.1f}MB")
     
     return metrics
 
@@ -376,6 +382,7 @@ def validate(model: VJEPA,
             device_manager,
             mask_generator: VideoMasker,
             config: VJEPASystemConfig,
+            progress_display: TrainingProgressDisplay, # Added
             writer: SummaryWriter,
             epoch: int):
     """
@@ -399,14 +406,7 @@ def validate(model: VJEPA,
     # Get AMP context
     amp_context = device_manager.get_amp_context(config.training.amp)
     
-    # Create progress display
-    progress_display = TrainingProgressDisplay(
-        total_epochs=1,  # Just one validation pass
-        steps_per_epoch=len(loader),
-        metrics=['val_loss', 'batch_t_val'],
-        use_rich=True  # Use Rich for fancy display
-    )
-    progress_display.start()
+    # Progress display is now passed in and started/stopped by the caller
     
     # Validation statistics
     val_loss = 0.0
@@ -442,15 +442,12 @@ def validate(model: VJEPA,
             # Update progress display
             metrics = {
                 'val_loss': loss.item(),
-                'batch_t_val': batch_time.val
+                'batch_t_val': batch_time.val # Note: 'batch_t_val' might need to be added to the main progress_display's metrics list
             }
-            progress_display.update_display(1, i+1, metrics)
+            progress_display.update_display(epoch, i + 1, metrics) # Use the current training epoch
             
             # Reset end time
             end = time.time()
-    
-    # Stop progress display
-    progress_display.stop()
     
     # Calculate metrics
     metrics = {
@@ -595,6 +592,15 @@ def train(config: VJEPASystemConfig):
     # Create memory monitor
     memory_monitor = MemoryMonitor(background=True)
     memory_monitor.start_background_monitoring()
+
+    # Create a single progress display instance
+    progress_display_metrics = ['loss', 'lr', 'memory_mb', 'data_time', 'batch_time', 'val_loss', 'batch_t_val']
+    progress_display = TrainingProgressDisplay(
+        total_epochs=config.training.epochs,
+        steps_per_epoch=len(train_loader), # Base step count on train_loader
+        metrics=progress_display_metrics,
+        use_rich=True
+    )
     
     # Initialize training state
     start_epoch = 0
@@ -616,6 +622,9 @@ def train(config: VJEPASystemConfig):
     logger.info(f"Training with batch size {config.training.batch_size} * {config.optimizer.grad_accumulation_steps} (accumulation)")
     logger.info(f"Training for {config.training.epochs} epochs")
     
+    # Start the progress display
+    progress_display.start()
+
     # Main training loop
     for epoch in range(start_epoch, config.training.epochs):
         # Train for one epoch
@@ -628,6 +637,7 @@ def train(config: VJEPASystemConfig):
             mask_generator=mask_generator,
             epoch=epoch,
             config=config,
+            progress_display=progress_display,
             writer=writer,
             memory_monitor=memory_monitor
         )
@@ -640,6 +650,7 @@ def train(config: VJEPASystemConfig):
                 device_manager=device_manager,
                 mask_generator=mask_generator,
                 config=config,
+                progress_display=progress_display,
                 writer=writer,
                 epoch=epoch
             )
@@ -689,6 +700,7 @@ def train(config: VJEPASystemConfig):
         device_manager=device_manager,
         mask_generator=mask_generator,
         config=config,
+        progress_display=progress_display,
         writer=writer,
         epoch=config.training.epochs
     )
@@ -722,6 +734,9 @@ def train(config: VJEPASystemConfig):
     
     # Close TensorBoard writer
     writer.close()
+
+    # Stop the progress display
+    progress_display.stop()
     
     logger.info("Training completed successfully!")
 
@@ -752,23 +767,91 @@ class AverageMeter(object):
 
 
 def main():
-    """Main function."""
+    """Main function with improved handling."""
+    setup_graceful_shutdown()
+    
     # Parse arguments
     args = parse_args()
+    
+    # Initialize timestamp for experiment
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    experiment_id = f"vjepa_{timestamp}"
+    
+    # Add timestamp to experiment name if not specified
+    if args.experiment_name is None:
+        args.experiment_name = experiment_id
     
     # Load configuration
     config = load_config(args)
     
-    # Set random seed for reproducibility
-    seed = config.runtime.seed
-    torch.manual_seed(seed)
-    np.random.seed(seed)
+    # Configure for limited memory
+    if args.optimize_for_m1:
+        logger.info("Applying memory optimizations for M1")
+        
+        # Dataset optimizations
+        config.dataset.fast_start = True  # Skip preloading
+        config.dataset.lazy_loading = True  # Load videos on demand
+        config.dataset.preload_to_memory = False  # Don't preload to memory
+        config.dataset.max_preload_videos = 10  # Limit preloaded videos
+        config.dataset.max_preload_time = 30  # Limit preloading time
+        
+        # Training optimizations
+        config.training.batch_size = min(2, config.training.batch_size)
+        config.training.accumulation_steps = max(4, config.training.accumulation_steps)
+        config.runtime.threads["dataloader"] = 1
+        config.runtime.threads["omp"] = 2
+        config.training.empty_cache_freq = 1  # Empty cache after every batch
+        
+        # Model optimizations
+        if hasattr(config.model, 'encoder_config'):
+            config.model.encoder_config.use_gradient_checkpointing = True
+            config.model.encoder_config.use_half_precision = True
+        
+        # Video format optimizations
+        if hasattr(config.model, 'encoder_config'):
+            # Reduce resolution for faster processing
+            if config.model.encoder_config.img_size > 64:
+                logger.info(f"Reducing image size from {config.model.encoder_config.img_size} to 64")
+                config.model.encoder_config.img_size = 64
+    
+    # Add subsample option for testing
+    if args.debug:
+        # Use a tiny subset for debugging
+        config.dataset.max_dataset_size = 100  # Limit to 100 videos
+        config.training.epochs = 2  # Just 2 epochs for testing
+    
+    # Set random seed
+    torch.manual_seed(config.runtime.seed)
+    np.random.seed(config.runtime.seed)
     
     # Set environment variables
     os.environ["TORCH_MPS_USE_SYSTEM_ALLOCATOR"] = "1"  # Better MPS memory management
+    os.environ["OMP_NUM_THREADS"] = str(config.runtime.threads["omp"])
     
-    # Start training
-    train(config)
+    # Check for existing checkpoint to resume
+    if config.training.resume is None:
+        # Check for latest checkpoint
+        checkpoint_dir = config.training.checkpoint_dir
+        if os.path.exists(checkpoint_dir):
+            checkpoints = [f for f in os.listdir(checkpoint_dir) if f.startswith('checkpoint_') and f.endswith('.pth')]
+            if checkpoints:
+                # Sort by epoch number
+                checkpoints.sort(key=lambda x: int(x.split('_')[1].split('.')[0]))
+                latest = os.path.join(checkpoint_dir, checkpoints[-1])
+                logger.info(f"Found existing checkpoint: {latest}")
+                response = input(f"Resume from this checkpoint? (y/n): ")
+                if response.lower() == 'y':
+                    config.training.resume = latest
+    
+    # Run training
+    try:
+        train(config)
+    except KeyboardInterrupt:
+        logger.info("Training interrupted by user")
+    except Exception as e:
+        logger.error(f"Training failed: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
 
 
 if __name__ == "__main__":

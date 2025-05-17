@@ -237,14 +237,14 @@ class TrainingProgressDisplay:
     def setup_rich_display(self):
         """Set up rich display components."""
         self.layout = Layout()
-        
+
         # Create header section
         self.layout.split(
             Layout(name="header", size=3),
             Layout(name="body"),
-            Layout(name="footer", size=10)
+            Layout(name="footer", size=7)  # Adjusted size
         )
-        
+
         # Set up progress bars
         self.progress = Progress(
             SpinnerColumn(),
@@ -254,8 +254,9 @@ class TrainingProgressDisplay:
             TextColumn("[bold yellow]{task.fields[speed]:.2f} it/s"),
             TimeElapsedColumn(),
             TimeRemainingColumn(),
+            expand=True
         )
-        
+
         # Create tasks
         self.epoch_task = self.progress.add_task(
             "[green]Epochs", total=self.total_epochs, speed=0
@@ -263,10 +264,21 @@ class TrainingProgressDisplay:
         self.step_task = self.progress.add_task(
             "[cyan]Steps", total=self.steps_per_epoch, speed=0
         )
-        
+
+        # Define body layout structure (will hold progress and metrics table)
+        self.body_sub_layout = Layout(name="body_content")
+        self.body_sub_layout.split_row(
+            Layout(self.progress, name="progress_panel"),
+            Layout(name="metrics_panel")  # Placeholder for metrics table
+        )
+
+        self.layout["header"].update(self.generate_header())
+        self.layout["body"].update(self.body_sub_layout)
+        self.layout["footer"].update(self.generate_system_info())
+
         # Initialize live display
-        self.live = Live(self.layout, console=self.console, refresh_per_second=4)
-    
+        self.live = Live(self.layout, console=self.console, refresh_per_second=4, vertical_overflow="visible")
+
     def generate_header(self) -> Union[Panel, str]:
         """Generate header section."""
         if self.use_rich:
@@ -362,18 +374,15 @@ class TrainingProgressDisplay:
     def _update_rich_display(self, epoch: int, step: int, speed: float):
         """Update rich display."""
         # Update progress bars
-        self.progress.update(self.epoch_task, completed=epoch-1, speed=speed/self.steps_per_epoch)
+        current_epoch_speed = speed / self.steps_per_epoch if self.steps_per_epoch > 0 else 0.0
+        self.progress.update(self.epoch_task, completed=epoch - 1, speed=current_epoch_speed)
         self.progress.update(self.step_task, completed=step, speed=speed)
-        
+
         # Update layout sections
         self.layout["header"].update(self.generate_header())
-        
-        body_layout = Layout()
-        body_layout.split_row(
-            Layout(self.progress, name="progress"),
-            Layout(self.generate_metrics_table(), name="metrics")
-        )
-        self.layout["body"].update(body_layout)
+
+        # Update the metrics panel within the body_sub_layout
+        self.body_sub_layout["metrics_panel"].update(self.generate_metrics_table())
         self.layout["footer"].update(self.generate_system_info())
     
     def _update_simple_display(self, epoch: int, step: int, speed: float):
@@ -480,14 +489,14 @@ class BenchmarkProgressDisplay:
     def setup_rich_display(self):
         """Set up rich display components."""
         self.layout = Layout()
-        
+
         # Create header section
         self.layout.split(
             Layout(name="header", size=3),
             Layout(name="body"),
-            Layout(name="footer", size=10)
+            Layout(name="footer", size=7)  # Adjusted size
         )
-        
+
         # Set up progress bars
         self.progress = Progress(
             SpinnerColumn(),
@@ -497,16 +506,29 @@ class BenchmarkProgressDisplay:
             TextColumn("[bold yellow]{task.fields[speed]:.2f} it/s"),
             TimeElapsedColumn(),
             TimeRemainingColumn(),
+            expand=True
         )
-        
+
         # Create tasks
         self.iter_task = self.progress.add_task(
             "[green]Progress", total=self.total_iterations + self.warmup_iterations, speed=0
         )
-        
+
+        # Define body layout structure
+        self.body_sub_layout = Layout(name="benchmark_body_content")
+        self.body_sub_layout.split_column(
+            Layout(self.progress, name="progress_panel", size=3),
+            Layout(name="phase_info_panel", size=1),
+            Layout(name="metrics_panel")
+        )
+
+        self.layout["header"].update(self.generate_header())
+        self.layout["body"].update(self.body_sub_layout)
+        self.layout["footer"].update(self.generate_system_info())
+
         # Initialize live display
-        self.live = Live(self.layout, console=self.console, refresh_per_second=4)
-    
+        self.live = Live(self.layout, console=self.console, refresh_per_second=4, vertical_overflow="visible")
+
     def generate_header(self) -> Union[Panel, str]:
         """Generate header section."""
         if self.use_rich:
@@ -631,20 +653,15 @@ class BenchmarkProgressDisplay:
                             completed=progress_iter, 
                             speed=throughput,
                             description=f"[green]{phase} Progress")
-        
+
         # Update layout sections
         self.layout["header"].update(self.generate_header())
-        
-        # Update body with metrics
-        phase_text = f"[bold yellow]{phase} Phase: {phase_iter}/{phase_total}"
-        
-        body_layout = Layout()
-        body_layout.split(
-            Layout(self.progress, name="progress", size=3),
-            Layout(Text(phase_text), name="phase", size=1),
-            Layout(self.generate_metrics_table(), name="metrics")
-        )
-        self.layout["body"].update(body_layout)
+
+        # Update components within the body_sub_layout
+        phase_text_renderable = Text(f"[bold yellow]{phase} Phase: {phase_iter}/{phase_total}", justify="center")
+        self.body_sub_layout["phase_info_panel"].update(phase_text_renderable)
+        self.body_sub_layout["metrics_panel"].update(self.generate_metrics_table())
+
         self.layout["footer"].update(self.generate_system_info())
     
     def _update_simple_display(self, phase, progress_iter, phase_iter, phase_total, throughput):
@@ -827,5 +844,11 @@ def configure_colorful_logger(name: str = "v-jepa", level: int = logging.INFO):
     
     handler.setFormatter(formatter)
     logger.addHandler(handler)
+    
+    # Add file handler as per user request
+    file_handler = logging.FileHandler(f'train_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log')
+    file_handler.setLevel(level)
+    file_handler.setFormatter(formatter) # Using the same formatter as console
+    logger.addHandler(file_handler)
     
     return logger

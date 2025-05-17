@@ -336,13 +336,15 @@ class MemoryEfficientBlock(nn.Module):
             
             # Apply gradient checkpointing
             x = x + torch.utils.checkpoint.checkpoint(
-                create_custom_forward(lambda x: self.attn(self.norm1(x))),
-                x
+                create_custom_forward(lambda current_x: self.attn(self.norm1(current_x))),
+                x,
+                use_reentrant=False # Explicitly set as recommended
             )
             
             x = x + torch.utils.checkpoint.checkpoint(
-                create_custom_forward(lambda x: self.mlp(self.norm2(x))),
-                x
+                create_custom_forward(lambda current_x: self.mlp(self.norm2(current_x))),
+                x,
+                use_reentrant=False # Explicitly set as recommended
             )
         else:
             # Standard forward pass

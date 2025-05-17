@@ -10,9 +10,12 @@ from dataclasses import dataclass
 import logging
 import av
 import threading
-import queue
+import queue # Keep existing queue import
+import time # Add time import
+from queue import Queue, Empty # Add specific imports from queue
 
 # Try to import PyTorchVideo classes
+
 try:
     from pytorchvideo.data import LabeledVideoDataset
     from pytorchvideo.data.clip_sampling import ClipSampler
@@ -45,6 +48,13 @@ class VideoDatasetConfig:
     # Memory optimization properties
     optimize_for_m1: bool = True  # Apply M1-specific optimizations
     prefetch_factor: int = 2
+    fast_start: bool = True             # Skip preloading for faster startup
+    max_preload_videos: int = 100       # Limit videos to preload (Note: similar to preload_max_videos)
+    max_preload_time: int = 30          # Max seconds to spend preloading
+    verify_structure: bool = True       # Verify directory structure
+    max_dataset_size: Optional[int] = None  # Limit total dataset size for testing
+    lazy_loading: bool = True           # Load videos on-demand instead of preloading
+    log_progress: bool = True           # Show detailed loading progress
     multiprocessing_context: str = "fork"  # "fork" or "spawn"
 
 
@@ -159,58 +169,81 @@ class MemoryEfficientVideoDataset(Dataset):
         self.config = config
         self.transform = transform
         
+        # Add better logging and timing
+        start_time = time.time()
+        logger.info(f"Initializing VideoDataset with path: {config.path}")
+        
+        # Verify structure if requested
+        if getattr(config, 'verify_structure', True):
+            self._verify_structure()
+        
         # Set up paths
+        logger.info("Finding video paths...")
         self.paths = self._get_video_paths()
+        
+        # Limit dataset size if configured
+        if getattr(config, 'max_dataset_size', None) is not None:
+            orig_size = len(self.paths)
+            self.paths = self.paths[:config.max_dataset_size]
+            logger.info(f"Limited dataset from {orig_size} to {len(self.paths)} videos")
+        
+        logger.info(f"Found {len(self.paths)} videos in {config.path}")
         
         # Set up clip sampler
         self.clip_sampler = self._create_clip_sampler()
         
-        # Initialize self.dataset to None
-        self.dataset = None 
-        if PYTORCHVIDEO_AVAILABLE:
+        # Initialize other components with better defaults
+        self.dataset = None
+        if PYTORCHVIDEO_AVAILABLE and not getattr(config, 'lazy_loading', True):
             try:
-                self.dataset = LabeledVideoDataset(
-                    labeled_video_paths=self.paths,
-                    clip_sampler=self.clip_sampler,
-                    transform=self._transform, # This is your internal wrapper
-                    decode_audio=self.config.decode_audio,
-                    decoder=self.config.decoder
-                )
-                
-                # Correctly test the IterableDataset functionality
-                if self.dataset is not None and len(self.paths) > 0:
-                    logger.info("Attempting to fetch a test item from LabeledVideoDataset...")
-                    try:
-                        # For IterableDataset, get an iterator and try to fetch one item
-                        _ = next(iter(self.dataset)) # This correctly tests iteration
-                        logger.info("Successfully fetched a test item from LabeledVideoDataset.")
-                    except StopIteration:
-                        logger.warning("LabeledVideoDataset is empty or exhausted on the first test item.")
-                        # This might be okay if the dataset can be empty, or an issue if not.
-                    except Exception as e_iter:
-                        logger.warning(f"Could not fetch a test item from LabeledVideoDataset during initial test: {e_iter}. "
-                                       f"PytorchVideo path might have issues for some items. Will rely on fallback if needed.")
-                        # Depending on how critical this test is, you might decide to set self.dataset = None here
-                        # to force fallback for all items if this initial check fails.
-                        # For now, we'll allow it to proceed and let __getitem__ handle individual item errors.
+                # Only try to create PyTorchVideo dataset if not using lazy loading
+                logger.info("Attempting to initialize PyTorchVideo dataset...")
+                if PYTORCHVIDEO_AVAILABLE: # Redundant check, but keeps structure from original
+                    self.dataset = LabeledVideoDataset(
+                        labeled_video_paths=self.paths,
+                        clip_sampler=self.clip_sampler,
+                        transform=self._transform, # This is your internal wrapper
+                        decode_audio=self.config.decode_audio,
+                        decoder=self.config.decoder
+                    )
+                    
+                    # Correctly test the IterableDataset functionality
+                    if self.dataset is not None and len(self.paths) > 0:
+                        logger.info("Attempting to fetch a test item from LabeledVideoDataset...")
+                        try:
+                            # For IterableDataset, get an iterator and try to fetch one item
+                            _ = next(iter(self.dataset)) # This correctly tests iteration
+                            logger.info("Successfully fetched a test item from LabeledVideoDataset.")
+                        except StopIteration:
+                            logger.warning("LabeledVideoDataset is empty or exhausted on the first test item.")
+                        except Exception as e_iter:
+                            logger.warning(f"Could not fetch a test item from LabeledVideoDataset during initial test: {e_iter}. "
+                                           f"PytorchVideo path might have issues for some items. Will rely on fallback if needed.")
             except Exception as e_init:
-                logger.error(f"Error during LabeledVideoDataset initialization: {e_init}. "
-                               f"Will use fallback _load_video_directly for all items.")
+                logger.error(f"Failed to initialize PyTorchVideo dataset: {e_init}")
                 self.dataset = None # Ensure self.dataset is None if initialization itself fails
         else:
-            logger.info("PyTorchVideo is not available. Using fallback _load_video_directly for all items.")
-            # self.dataset is already None, which is correct
+            if not PYTORCHVIDEO_AVAILABLE:
+                logger.info("PyTorchVideo is not available. Using fallback _load_video_directly for all items.")
+            elif getattr(config, 'lazy_loading', True):
+                logger.info("Lazy loading enabled. PyTorchVideo dataset will be initialized on demand if needed.")
 
-        # Pre-load all items from PyTorchVideo dataset for random access
+        # Initialize for lazy loading or if PyTorchVideo init failed
         self.dataset_items = []
-                
-        # Set up memory cache if preloading
         self.video_cache = {}
-        if config.preload_to_memory:
-            self._preload_videos()
         
-        # Pre-load PyTorchVideo items for faster random access if dataset is available
-        self._preload_pytorchvideo_items()
+        # Only preload videos or dataset items if not in fast start mode
+        fast_start = getattr(config, 'fast_start', True)
+        if not fast_start:
+            if config.preload_to_memory:
+                self._preload_videos() # This already calls _preload_pytorchvideo_items if needed
+            elif self.dataset is not None: # If not preloading videos but PTV dataset exists
+                self._preload_pytorchvideo_items() 
+        else:
+            logger.info("Fast start mode: skipping preloading")
+        
+        init_time = time.time() - start_time
+        logger.info(f"Dataset initialization completed in {init_time:.2f} seconds")
     
     def _get_video_paths(self) -> List[Tuple[str, Dict]]:
         """Get list of video paths."""
@@ -362,6 +395,27 @@ class MemoryEfficientVideoDataset(Dataset):
         empty_cache()
         self._preload_pytorchvideo_items()
 
+    def _verify_structure(self):
+        """Verify dataset structure and count videos."""
+        logger.info(f"Verifying dataset structure at {self.config.path}")
+        
+        if not os.path.exists(self.config.path):
+            raise FileNotFoundError(f"Dataset path does not exist: {self.config.path}")
+        
+        if not os.path.isdir(self.config.path):
+            # If it's a file, assume it's a list of paths, which is handled by _get_video_paths
+            if os.path.isfile(self.config.path):
+                logger.info(f"Dataset path {self.config.path} is a file, assuming list of video paths.")
+                return # No further directory structure to verify
+            raise NotADirectoryError(f"Dataset path is not a directory or a valid file: {self.config.path}")
+        
+        # Count action classes and videos if it's a directory
+        class_dirs = [d for d in os.listdir(self.config.path) 
+                      if os.path.isdir(os.path.join(self.config.path, d))]
+        
+        video_count = sum(len([f for f in os.listdir(os.path.join(self.config.path, cd)) if f.endswith(('.mp4', '.avi', '.mov', '.mkv'))]) for cd in class_dirs)
+        logger.info(f"Found {len(class_dirs)} action classes with {video_count} videos in directory structure.")
+
     
     def __len__(self) -> int:
         """Get dataset length."""
@@ -408,86 +462,79 @@ class MemoryEfficientVideoDataset(Dataset):
             
     def _load_video_directly(self, idx: int) -> torch.Tensor:
         """Fallback to load video directly using PyAV if PyTorchVideo fails or is unavailable."""
-        video_path_str = self.paths[idx][0] # self.paths stores tuples of (path_str, info_dict)
+        video_path_str = self.paths[idx][0]
+        
         # Clear memory before loading
         empty_cache()
-        logger.info(f"Directly loading video from {video_path_str} using PyAV fallback.")
-
+        
         try:
+            logger.debug(f"Loading video {idx}: {video_path_str}")
+            start_time = time.time()
+            
             container = av.open(video_path_str)
             stream = container.streams.video[0]
             
             video_fps = float(stream.average_rate if stream.average_rate else self.config.frame_rate)
             
             frames = []
-            # Calculate the number of frames to sample for the desired clip duration and frame rate
+            # Calculate frames to sample
             num_frames_to_sample = int(self.config.clip_duration * self.config.frame_rate)
-            logger.info(f"Fallback load: Frames to sample: {num_frames_to_sample}")
             
-            # This is a simple sequential frame sampling strategy for the fallback.
-            # It aims to extract 'num_frames_to_sample' at roughly the target 'self.config.frame_rate'.
+            # Determine frame interval
+            frame_interval = max(1.0, video_fps / self.config.frame_rate)
             
-            # Determine the interval to pick frames from the original video stream
-            # to match the target self.config.frame_rate.
-            frame_interval = video_fps / self.config.frame_rate
-            if frame_interval <= 0: # Avoid division by zero or negative interval
-                frame_interval = 1.0 
-
             output_frames_collected = 0
-            # Represents the "ideal" floating point index in the original video stream
-            current_target_frame_original_idx = 0.0 
-
-            for frame_idx, frame in enumerate(container.decode(video=0)):
+            current_target_frame_idx = 0.0
+            
+            # Use a counter to avoid infinite loops
+            max_frames_to_process = min(500, int(video_fps * 10))  # Limit to 10 seconds max
+            frame_count = 0
+            
+            for frame in container.decode(video=0):
+                frame_count += 1
+                if frame_count > max_frames_to_process:
+                    logger.warning(f"Hit frame limit ({max_frames_to_process}) when processing {video_path_str}")
+                    break
+                    
                 if output_frames_collected >= num_frames_to_sample:
                     break
-                
-                # Select the frame if its actual index is at or after the current target index
-                if frame_idx >= int(round(current_target_frame_original_idx)): # Round to nearest whole frame index
-                    # Convert PyAV frame to RGB Pillow Image, then to NumPy array, then to PyTorch tensor
-                    img = torch.from_numpy(np.array(frame.to_image().convert('RGB'))).permute(2, 0, 1)  # Shape: (C, H, W)
-                    # Using print as per user's debugging example for these specific lines
-                    print(f"Fallback load: Shape of img after frame conversion: {img.shape}") 
+                    
+                if frame_count >= int(round(current_target_frame_idx)):
+                    # Convert frame to tensor
+                    img = torch.from_numpy(np.array(frame.to_image().convert('RGB'))).permute(2, 0, 1)
                     frames.append(img)
                     output_frames_collected += 1
-                    current_target_frame_original_idx += frame_interval
+                    current_target_frame_idx += frame_interval
             
             container.close()
-
+            
             if not frames:
-                logger.warning(f"Fallback: No frames extracted from {video_path_str}. Returning zeros.")
-                # Use a consistent placeholder shape (C, T, H, W)
+                logger.warning(f"No frames extracted from {video_path_str}, using dummy tensor")
+                # Return dummy tensor with expected dimensions
                 return torch.zeros((3, num_frames_to_sample, 128, 128), 
                                    dtype=torch.float16 if self.config.use_half_precision else torch.float32)
-
-            # Stack frames to form a video tensor (T, C, H, W)
-            video_tensor = torch.stack(frames, dim=0)
-            print(f"Fallback load: Shape of video_tensor before transform: {video_tensor.shape}")
-
+            
+            # Stack frames
+            video_tensor = torch.stack(frames, dim=0)  # [T, C, H, W]
+            
+            # Apply transforms if needed
             if self.transform:
                 video_tensor = self.transform(video_tensor)
-                print(f"Fallback load: Shape of video_tensor after transform: {video_tensor.shape}")
             
-            # Ensure output tensor is in (C, T, H, W) format.
-            # Assumes C=3. If video_tensor is (T, 3, H, W), permute it.
-            if video_tensor.ndim == 4:
-                if video_tensor.shape[1] == 3: # Likely (T, 3, H, W)
-                    logger.info(f"Fallback load: Permuting video_tensor from {video_tensor.shape} to (C,T,H,W).")
-                    video_tensor = video_tensor.permute(1, 0, 2, 3) # New shape: (3, T, H, W)
-                elif video_tensor.shape[0] == 3: # Likely already (3, T, H, W)
-                    logger.info(f"Fallback load: video_tensor shape {video_tensor.shape} is already (C,T,H,W)-like.")
-                else:
-                    logger.warning(f"Fallback load: video_tensor has shape {video_tensor.shape} after transform. Cannot determine C and T for standard (C,T,H,W) permutation. Expected 3 channels.")
-            else:
-                logger.warning(f"Fallback load: video_tensor has unexpected ndim {video_tensor.ndim} after transform. Expected 4 dimensions.")
+            # Ensure output shape is [C, T, H, W]
+            if video_tensor.ndim == 4 and video_tensor.shape[1] == 3:
+                video_tensor = video_tensor.permute(1, 0, 2, 3)  # [C, T, H, W]
             
             if self.config.use_half_precision:
                 video_tensor = video_tensor.to(torch.float16)
             
-            print(f"Fallback load: Final shape of video_tensor being returned: {video_tensor.shape}")
+            load_time = time.time() - start_time
+            logger.debug(f"Loaded video in {load_time:.3f}s, shape: {video_tensor.shape}")
+            
             return video_tensor
-
         except Exception as e:
-            logger.error(f"Error in fallback video loading for {video_path_str}: {e}")
+            logger.error(f"Error loading video {video_path_str}: {e}")
+            # Return dummy tensor with expected dimensions
             num_dummy_frames = int(self.config.frame_rate * self.config.clip_duration)
             return torch.zeros((3, num_dummy_frames, 128, 128), 
                                dtype=torch.float16 if self.config.use_half_precision else torch.float32)

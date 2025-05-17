@@ -481,11 +481,12 @@ def main():
     config = load_config(args)
     
     # Set random seed for reproducibility
-    torch.manual_seed(42)
-    np.random.seed(42)
+    torch.manual_seed(config.runtime.seed)
+    np.random.seed(config.runtime.seed)
     
     # Set environment variables
     os.environ["TORCH_MPS_USE_SYSTEM_ALLOCATOR"] = "1"  # Better MPS memory management
+    os.environ["OMP_NUM_THREADS"] = str(config.runtime.threads["omp"])
     
     # Setup device
     device_manager = get_device_manager(config.runtime.device, config.runtime.precision)
