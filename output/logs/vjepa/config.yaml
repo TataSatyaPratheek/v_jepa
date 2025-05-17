@@ -1,0 +1,129 @@
+dataset:
+  clip_duration: 1.5
+  clip_overlap: 0.0
+  clip_sampler: random
+  decode_audio: false
+  decoder: pyav
+  frame_rate: 16.0
+  multiprocessing_context: fork
+  multithreaded_io: true
+  optimize_for_m1: true
+  path: data/hmdb51/processed
+  prefetch_factor: 1
+  preload_max_videos: 100
+  preload_to_memory: false
+  transform_backend: torchvision
+  use_half_precision: true
+masking:
+  block_size: 2
+  mask_on_token: true
+  mask_ratio: 0.75
+  shared_masking: true
+  strategy: tube
+  temporal_window: 2
+model:
+  encoder_config:
+    attn_drop_rate: 0.0
+    depth: 6
+    drop_rate: 0.0
+    embed_dim: 384
+    fused_matmul: true
+    img_size: 128
+    in_channels: 3
+    mlp_ratio: 4.0
+    model_type: MemoryEfficientViT
+    norm_layer: layer_norm
+    num_heads: 6
+    patch_size: 16
+    qkv_bias: true
+    temporal_depth: 2
+    use_flash_attention: false
+    use_gradient_checkpointing: true
+    use_half_precision: true
+    use_temporal_attention: true
+  momentum: 0.99
+  predictor_config:
+    activation: gelu
+    dropout: 0.0
+    final_activation: null
+    fused_operations: true
+    hidden_dim: 192
+    input_dim: 384
+    num_layers: 2
+    output_dim: 384
+    use_bias: true
+    use_bn: true
+  share_parameters: true
+  stop_gradient: true
+  target_update_interval: 1
+  use_cosine_loss: false
+  use_mask_weighting: true
+  use_momentum_encoder: true
+optimizer:
+  betas:
+  - 0.9
+  - 0.95
+  clip_grad_norm: 1.0
+  eps: 1.0e-08
+  fused: true
+  grad_accumulation_steps: 4
+  lr: 0.0001
+  min_lr: 1.0e-06
+  momentum: 0.9
+  optimizer_type: adamw
+  scheduler_type: cosine
+  t_max: null
+  use_lookahead: false
+  use_sam: false
+  warmup_epochs: 10
+  weight_decay: 0.05
+runtime:
+  compile: false
+  device: auto
+  memory_limit: null
+  precision: 16
+  profile: false
+  seed: 42
+  threads:
+    dataloader: 2
+    io: 2
+    omp: 2
+training:
+  accumulation_steps: 4
+  amp: true
+  batch_size: 2
+  checkpoint_dir: output/checkpoints/vjepa
+  dist_backend: nccl
+  dist_url: tcp://localhost:10001
+  distributed: false
+  empty_cache_freq: 5
+  epochs: 50
+  eval_every: 1
+  experiment_name: vjepa
+  log_dir: output/logs/vjepa
+  optimize_for_m1: true
+  resume: null
+  save_every: 5
+transforms:
+  backend: torchvision
+  brightness: 0.4
+  cache_random_params: true
+  color_jitter: true
+  contrast: 0.4
+  crop_scale:
+  - 0.8
+  - 1.0
+  mean:
+  - 0.485
+  - 0.456
+  - 0.406
+  mode: train
+  normalize: true
+  random_crop: true
+  random_flip: true
+  saturation: 0.4
+  size: 128
+  std:
+  - 0.229
+  - 0.224
+  - 0.225

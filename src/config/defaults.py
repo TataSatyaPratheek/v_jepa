@@ -1,7 +1,7 @@
 import os
 import yaml
 from typing import Dict, Any, Optional, List, Union
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, fields
 import hydra
 from omegaconf import OmegaConf, DictConfig
 import logging
@@ -109,15 +109,60 @@ class VJEPASystemConfig:
         Returns:
             Configuration instance
         """
-        # Create nested configurations
-        model_config = VJEPAConfig(**config_dict.get('model', {}))
-        dataset_config = VideoDatasetConfig(**config_dict.get('dataset', {}))
-        transforms_config = TransformConfig(**config_dict.get('transforms', {}))
-        masking_config = MaskingConfig(**config_dict.get('masking', {}))
-        optimizer_config = OptimizerConfig(**config_dict.get('optimizer', {}))
-        training_config = TrainingConfig(**config_dict.get('training', {}))
-        runtime_config = RuntimeConfig(**config_dict.get('runtime', {}))
-        
+        # Imports are already at the top of the file, no need to re-import here.
+
+        # Helper function to filter dict to only include valid parameters for a dataclass
+        def filter_params(param_dict, dataclass_type):
+            valid_fields = {field.name for field in fields(dataclass_type)}
+            return {k: v for k, v in param_dict.items() if k in valid_fields}
+
+        # Instantiate leaf dataclasses first, then composite ones.
+        # RuntimeConfig
+        runtime_params = filter_params(config_dict.get('runtime', {}), RuntimeConfig)
+        runtime_config = RuntimeConfig(**runtime_params)
+
+        # TrainingConfig
+        training_params = filter_params(config_dict.get('training', {}), TrainingConfig)
+        training_config = TrainingConfig(**training_params)
+
+        # OptimizerConfig
+        optimizer_params = filter_params(config_dict.get('optimizer', {}), OptimizerConfig)
+        optimizer_config = OptimizerConfig(**optimizer_params)
+
+        # MaskingConfig
+        masking_params = filter_params(config_dict.get('masking', {}), MaskingConfig)
+        masking_config = MaskingConfig(**masking_params)
+
+        # TransformConfig
+        transforms_params = filter_params(config_dict.get('transforms', {}), TransformConfig)
+        transforms_config = TransformConfig(**transforms_params)
+
+        # VideoDatasetConfig
+        dataset_params = filter_params(config_dict.get('dataset', {}), VideoDatasetConfig)
+        dataset_config = VideoDatasetConfig(**dataset_params)
+
+        # ModelConfig (VJEPAConfig with nested EncoderConfig and PredictorConfig)
+        model_dict = config_dict.get('model', {})
+
+        encoder_conf_dict = model_dict.get('encoder_config', {})
+        encoder_config_obj = EncoderConfig(**filter_params(encoder_conf_dict, EncoderConfig))
+
+        predictor_conf_dict = model_dict.get('predictor_config', {})
+        predictor_config_obj = PredictorConfig(**filter_params(predictor_conf_dict, PredictorConfig))
+
+        # Get direct VJEPAConfig parameters (excluding nested ones we just handled)
+        vjepa_direct_params_dict = {
+            k: v for k, v in model_dict.items()
+            if k not in ['encoder_config', 'predictor_config']
+        }
+        vjepa_filtered_direct_params = filter_params(vjepa_direct_params_dict, VJEPAConfig)
+
+        model_config = VJEPAConfig(
+            **vjepa_filtered_direct_params,
+            encoder_config=encoder_config_obj,
+            predictor_config=predictor_config_obj
+        )
+
         # Create system config
         return cls(
             model=model_config,
@@ -176,7 +221,7 @@ def get_default_config() -> VJEPASystemConfig:
 
 
 # Initialize Hydra
-@hydra.main(config_path="../config", config_name="defaults")
+@hydra.main(config_path="../config", config_name="defaults", version_base="1.3")
 def create_config(config: DictConfig) -> VJEPASystemConfig:
     """
     Create configuration from Hydra.
@@ -200,40 +245,37 @@ def apply_m1_optimizations(config: VJEPASystemConfig) -> VJEPASystemConfig:
     Returns:
         Optimized configuration
     """
-    # Create a copy of the config
-    optimized_config = VJEPASystemConfig(**asdict(config))
-    
     # Memory optimizations for M1
     # 1. Runtime settings
-    optimized_config.runtime.precision = 16  # Use half precision
-    optimized_config.runtime.threads["omp"] = 2  # Limit OpenMP threads
-    optimized_config.runtime.threads["dataloader"] = 2  # Limit DataLoader workers
-    optimized_config.runtime.threads["io"] = 2  # Limit IO threads
+    config.runtime.precision = 16  # Use half precision
+    config.runtime.threads["omp"] = 2  # Limit OpenMP threads
+    config.runtime.threads["dataloader"] = 2  # Limit DataLoader workers
+    config.runtime.threads["io"] = 2  # Limit IO threads
     
     # 2. Model settings
-    if optimized_config.model.encoder_config is None:
-        optimized_config.model.encoder_config = EncoderConfig()
+    if config.model.encoder_config is None: # Ensure encoder_config exists if we are to modify it
+        config.model.encoder_config = EncoderConfig()
     
-    optimized_config.model.encoder_config.use_half_precision = True
-    optimized_config.model.encoder_config.use_gradient_checkpointing = True
-    optimized_config.model.share_parameters = True  # Share encoder parameters to save memory
+    config.model.encoder_config.use_half_precision = True
+    config.model.encoder_config.use_gradient_checkpointing = True
+    config.model.share_parameters = True  # Share encoder parameters to save memory
     
     # 3. Training settings
-    optimized_config.training.batch_size = 2
-    optimized_config.training.accumulation_steps = 4  # Use gradient accumulation
-    optimized_config.training.amp = True  # Use automatic mixed precision
-    optimized_config.training.empty_cache_freq = 5  # Frequently clear cache
-    optimized_config.training.optimize_for_m1 = True
+    config.training.batch_size = 2
+    config.training.accumulation_steps = 4  # Use gradient accumulation
+    config.training.amp = True  # Use automatic mixed precision
+    config.training.empty_cache_freq = 5  # Frequently clear cache
+    config.training.optimize_for_m1 = True
     
     # 4. Dataset settings
-    optimized_config.dataset.use_half_precision = True
-    optimized_config.dataset.optimize_for_m1 = True
+    config.dataset.use_half_precision = True
+    config.dataset.optimize_for_m1 = True
     
     # 5. Optimizer settings
-    optimized_config.optimizer.fused = True  # Use fused implementations
-    optimized_config.optimizer.grad_accumulation_steps = optimized_config.training.accumulation_steps
+    config.optimizer.fused = True  # Use fused implementations
+    config.optimizer.grad_accumulation_steps = config.training.accumulation_steps # Sync with training
     
-    return optimized_config
+    return config
 
 
 def create_defaults_py():

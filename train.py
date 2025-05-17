@@ -76,6 +76,8 @@ def load_config(args) -> VJEPASystemConfig:
         System configuration
     """
     # Start with default configuration but provide path
+    from src.config.defaults import VJEPASystemConfig, get_default_config, apply_m1_optimizations
+
     try:
         config = get_default_config()
         # Set the path immediately
@@ -84,7 +86,6 @@ def load_config(args) -> VJEPASystemConfig:
         # If the above fails, try an alternative approach
         # Create minimal config first
         from src.data.dataset import VideoDatasetConfig
-        from src.config.defaults import VJEPASystemConfig
         
         # Create the dataset config with path
         dataset_config = VideoDatasetConfig(path=args.data_path or "data/videos")

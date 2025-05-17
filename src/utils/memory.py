@@ -4,8 +4,12 @@ import os
 import psutil
 import threading
 import time
+import logging # Add logging import
 from typing import Optional, Dict, Any
 from .device import get_device_manager
+
+# Configure logger for this module
+logger = logging.getLogger(__name__)
 
 
 class MemoryMonitor:
@@ -157,19 +161,33 @@ class MemoryOptimizer:
         """
         # Get device manager
         device_manager = get_device_manager()
-        
+
+        # Check if M1-specific optimizations are implicitly active for inference
+        # (e.g., running on MPS with half-precision, which is a common M1 opt setting)
+        is_m1_optimized_inference = (
+            device_manager.device_str == "mps" and
+            device_manager.precision == 16
+        )
+
+        if is_m1_optimized_inference:
+            logger.info(
+                "MemoryOptimizer: M1/MPS detected with 16-bit precision. Applying inference optimizations (half precision, compilation if available)."
+            )
+
         # Apply model optimizations
         if device_manager.device_str != "cpu":
             # Use 16-bit inference if supported
             if device_manager.precision == 16:
+                logger.debug("MemoryOptimizer: Converting model to half precision for inference.")
                 model = model.half()
-        
+
         # Use model compilation if available (>= PyTorch 2.0)
         if hasattr(torch, 'compile'):
+            logger.debug("MemoryOptimizer: Attempting to compile model with torch.compile for inference.")
             model = device_manager.compile_model(model)
-        
+
         return model
-    
+
     @staticmethod
     def optimize_state_dict_memory(state_dict: Dict) -> Dict:
         """

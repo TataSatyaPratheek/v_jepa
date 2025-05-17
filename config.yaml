@@ -1,85 +1,156 @@
-# V-JEPA Configuration
+# V-JEPA Configuration (Restructured to match VJEPASystemConfig)
+# Values are taken from your original config.yaml where applicable,
+# otherwise, defaults from Python dataclasses are used.
 
-# Hardware settings
-hardware:
-  device: "auto"  # Will automatically use MPS on M1 Mac
-  precision: 16   # Half precision for memory efficiency
-  compile: true   # Use torch.compile for optimization
+runtime: # Corresponds to RuntimeConfig
+  device: "auto"  # From original hardware.device
+  precision: 16   # From original hardware.precision
+  compile: true   # From original hardware.compile
   threads:
-    omp: 2        # Limit OpenMP threads to avoid memory pressure
-    dataloader: 1  # Reduced from 2 to prevent RAM pressure during loading
-    io: 1          # Reduced IO threads to minimize resource conflicts
+    omp: 2        # From original hardware.threads.omp
+    dataloader: 1 # From original hardware.threads.dataloader (default: 2)
+    io: 1         # From original hardware.threads.io (default: 2)
+  profile: false  # Default from RuntimeConfig
+  memory_limit: null # Default from RuntimeConfig (use 'null' for None)
+  seed: 42        # Default from RuntimeConfig
 
-# Model configuration - reduced for 8GB RAM
+training: # Corresponds to TrainingConfig
+  batch_size: 2         # From original training.batch_size
+  accumulation_steps: 8 # From original training.accumulation_steps (default: 4)
+  epochs: 50            # From original training.epochs (default: 100)
+  save_every: 5         # From original checkpointing.save_every_n_epochs (default: 5)
+  eval_every: 1         # Default from TrainingConfig
+  log_dir: "logs"       # From original logging.save_dir (default: "logs")
+  experiment_name: "vjepa" # Default from TrainingConfig
+  checkpoint_dir: "checkpoints" # Default from TrainingConfig
+  resume: null          # Default from TrainingConfig (use 'null' for None)
+  distributed: false    # Default from TrainingConfig
+  dist_backend: "nccl"  # Default from TrainingConfig
+  dist_url: "tcp://localhost:10001" # Default from TrainingConfig
+  amp: true             # From original training.amp
+  empty_cache_freq: 2   # From original memory.empty_cache_freq (default: 5)
+  optimize_for_m1: true # From original memory.optimize_for_m1 (default: True)
+
 model:
-  architecture: "vjepa"
-  encoder:
-    type: "MemoryEfficientViT"
-    img_size: 128      # Reduced from 128 for better memory efficiency
-    patch_size: 16
-    dim: 384          # Reduced from 384 to lower memory requirements
-    depth: 6           # Reduced from 6 for memory efficiency
-    heads: 6           # Reduced from 6
-    mlp_ratio: 4.0
-    qkv_bias: true
-    use_gradient_checkpointing: true
-  predictor:
-    hidden_dim: 192    # Reduced from 192
-    use_bn: true
+  # Corresponds to VJEPAConfig
+  encoder_config: # Corresponds to EncoderConfig
+    model_type: "MemoryEfficientViT" # From original model.encoder.type (default: "vit")
+    img_size: 128      # From original model.encoder.img_size
+    patch_size: 16     # From original model.encoder.patch_size
+    in_channels: 3     # Default from EncoderConfig
+    embed_dim: 384     # From original model.encoder.dim (default: 384)
+    depth: 6           # From original model.encoder.depth
+    num_heads: 6       # From original model.encoder.heads (default: 6)
+    mlp_ratio: 4.0     # From original model.encoder.mlp_ratio
+    qkv_bias: true     # From original model.encoder.qkv_bias
+    drop_rate: 0.0     # Default from EncoderConfig
+    attn_drop_rate: 0.0 # Default from EncoderConfig
+    norm_layer: "layer_norm" # Default from EncoderConfig
+    use_half_precision: true # Default from EncoderConfig (related to runtime.precision)
+    use_gradient_checkpointing: true # From original model.encoder.use_gradient_checkpointing
+    use_temporal_attention: true # Default from EncoderConfig
+    temporal_depth: 2           # Default from EncoderConfig
+    fused_matmul: true          # Default from EncoderConfig
+    use_flash_attention: false  # Default from EncoderConfig
+  predictor_config: # Corresponds to PredictorConfig
+    input_dim: 384     # Default from PredictorConfig (should match encoder_config.embed_dim)
+    hidden_dim: 192    # From original model.predictor.hidden_dim
+    output_dim: 384    # Default from PredictorConfig (should match encoder_config.embed_dim)
+    num_layers: 2      # Default from PredictorConfig
+    use_bias: true     # Default from PredictorConfig
+    use_bn: true       # From original model.predictor.use_bn
+    dropout: 0.0       # Default from PredictorConfig
+    activation: "gelu" # Default from PredictorConfig
+    final_activation: null # Default from PredictorConfig (use 'null' for None)
+    fused_operations: true # Default from PredictorConfig
+  use_momentum_encoder: true # Default from VJEPAConfig
+  momentum: 0.99             # Default from VJEPAConfig
+  use_cosine_loss: false     # Default from VJEPAConfig
+  use_mask_weighting: true   # Default from VJEPAConfig
+  target_update_interval: 1  # Default from VJEPAConfig
+  stop_gradient: true        # Default from VJEPAConfig
+  share_parameters: false    # Default from VJEPAConfig
 
-# Data settings
-data:
-  dataset: "hmdb51"
-  root: "data/hmdb51/processed"
-  clip_duration: 1.5   # Reduced from 1.5 for memory efficiency
-  frame_rate: 16        # Reduced from 16 to lower memory usage
-  clip_sampler: "random"
-  transform_mode: "v1"
-  augmentations:
-    random_crop: true
-    random_flip: true
-    color_jitter: true
+dataset: # Corresponds to VideoDatasetConfig
+  path: "data/hmdb51/processed" # From original data.root (default: "data/videos")
+  clip_duration: 1.5   # From original data.clip_duration (default: 2.0)
+  frame_rate: 16.0     # From original data.frame_rate (default: 16.0)
+  clip_sampler: "random" # From original data.clip_sampler
+  decode_audio: false  # Default from VideoDatasetConfig
+  decoder: "pyav"      # Default from VideoDatasetConfig
+  transform_backend: "torchvision" # Default from VideoDatasetConfig (original data.transform_mode: "v1" was ambiguous)
+  use_half_precision: true # Default from VideoDatasetConfig (related to runtime.precision)
+  clip_overlap: 0.0    # Default from VideoDatasetConfig
+  multithreaded_io: true # Default from VideoDatasetConfig
+  preload_to_memory: false # Default from VideoDatasetConfig
+  preload_max_videos: 100  # Default from VideoDatasetConfig
+  optimize_for_m1: true # From original memory.optimize_for_m1 (default: True)
+  prefetch_factor: 1   # From original memory.prefetch_factor (default: 2)
+  multiprocessing_context: "fork" # Default from VideoDatasetConfig
 
-# Training settings
-training:
-  batch_size: 2        # Reduced from 2 for memory safety
-  accumulation_steps: 8  # Increased from 4 to maintain effective batch size
-  epochs: 50           # Reduced from 100 for faster experimentation
-  optimizer:
-    type: "adamw"
-    lr: 1.0e-4
-    weight_decay: 0.05
-    betas: [0.9, 0.95]
-    fused: true
-  scheduler:
-    type: "cosine"
-    warmup_epochs: 10   # Reduced from 10
-  amp: true            # Keep automatic mixed precision
-  clip_grad_norm: 1.0
+transforms: # Corresponds to TransformConfig
+  mode: "train"        # Default from TransformConfig
+  size: 128            # Default from TransformConfig (matches original model.encoder.img_size)
+  backend: "torchvision" # Default from TransformConfig (original data.transform_mode: "v1" was ambiguous)
+  random_crop: true    # From original data.augmentations.random_crop
+  crop_scale: [0.8, 1.0] # Default from TransformConfig
+  random_flip: true    # From original data.augmentations.random_flip
+  color_jitter: true   # From original data.augmentations.color_jitter
+  brightness: 0.4      # Default from TransformConfig
+  contrast: 0.4        # Default from TransformConfig
+  saturation: 0.4      # Default from TransformConfig
+  normalize: true      # Default from TransformConfig
+  mean: [0.485, 0.456, 0.406] # Default from TransformConfig
+  std: [0.229, 0.224, 0.225]  # Default from TransformConfig
+  cache_random_params: true # Default from TransformConfig
 
-# Masking strategy
 masking:
-  strategy: "tube"
-  ratio: 0.75
-  temporal_window: 2
+  # Corresponds to MaskingConfig
+  strategy: "tube"     # From original masking.strategy
+  mask_ratio: 0.75     # From original masking.ratio (default: 0.75)
+  temporal_window: 2   # From original masking.temporal_window
+  block_size: 2        # Default from MaskingConfig
+  mask_on_token: true  # Default from MaskingConfig
+  shared_masking: true # Default from MaskingConfig
 
-# Logging and checkpointing
-logging:
-  tensorboard: true
-  log_every_n_steps: 10  # More frequent logging to track progress
-  save_dir: "logs"
-checkpointing:
-  save_every_n_epochs: 5
-  keep_top_k: 2        # Reduced from 3 to save disk space
+optimizer: # Corresponds to OptimizerConfig
+  optimizer_type: "adamw" # From original training.optimizer.type
+  lr: 1.0e-4              # From original training.optimizer.lr
+  weight_decay: 0.05      # From original training.optimizer.weight_decay
+  momentum: 0.9           # Default from OptimizerConfig
+  betas: [0.9, 0.95]      # From original training.optimizer.betas
+  eps: 1.0e-8             # Default from OptimizerConfig
+  fused: true             # From original training.optimizer.fused
+  scheduler_type: "cosine" # From original training.scheduler.type
+  warmup_epochs: 10       # From original training.scheduler.warmup_epochs
+  min_lr: 1.0e-6          # Default from OptimizerConfig
+  t_max: null             # Default from OptimizerConfig (use 'null' for None)
+  clip_grad_norm: 1.0     # From original training.clip_grad_norm
+  use_lookahead: false    # Default from OptimizerConfig
+  use_sam: false          # Default from OptimizerConfig
+  grad_accumulation_steps: 1 # Default from OptimizerConfig (Note: training.accumulation_steps is separate)
 
-# Memory optimization - enhanced for M1
-memory:
-  empty_cache_freq: 2   # More frequent cache clearing (was 5)
-  optimize_for_m1: true
-  prefetch_factor: 1    # Reduced from 2 to limit memory usage during prefetching
-  pin_memory: true
+# --- Parameters from original config.yaml not part of VJEPASystemConfig ---
+# These parameters are commented out as they don't directly map to the
+# VJEPASystemConfig dataclass structure. You might use them for script-level
+# logic or specific utilities outside the main config object.
 
-# Dataset structure verification - added to help with dataset loading
-dataset:
-  verify_structure: true
-  path: "data/hmdb51/processed"  # Redundant but added for clarity
+# model:
+#   architecture: "vjepa" # Meta-parameter for model selection
+
+# data:
+#   dataset: "hmdb51"       # Meta-parameter for dataset selection
+
+# logging:
+#   tensorboard: true       # Specific to logging setup
+#   log_every_n_steps: 10   # Specific to logging setup
+
+# checkpointing:
+#   keep_top_k: 2           # Specific to checkpoint saving logic
+
+# memory:
+#   pin_memory: true        # Typically a DataLoader argument
+
+# dataset: # This was a second, redundant 'dataset' block
+#   verify_structure: true
+#   path: "data/hmdb51/processed" # Redundant with the main dataset.path

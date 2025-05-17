@@ -160,12 +160,11 @@ class MemoryEfficientVideoDataset(Dataset):
         
         # Initialize labeled video dataset
         self.dataset = LabeledVideoDataset(
-            self.paths,
-            self.clip_sampler,
+            labeled_video_paths=self.paths,
+            clip_sampler=self.clip_sampler,
             transform=self._transform,
             decode_audio=config.decode_audio,
-            decoder=config.decoder,
-            multithreaded_io=config.multithreaded_io
+            decoder=config.decoder
         )
         
         # Set up memory cache if preloading
@@ -173,9 +172,9 @@ class MemoryEfficientVideoDataset(Dataset):
         if config.preload_to_memory:
             self._preload_videos()
     
-    def _get_video_paths(self) -> List[Dict]:
+    def _get_video_paths(self) -> List[Tuple[str, Dict]]:
         """Get list of video paths."""
-        video_paths = []
+        video_path_tuples = []
         
         # Handle directory or file list
         if os.path.isdir(self.config.path):
@@ -184,10 +183,9 @@ class MemoryEfficientVideoDataset(Dataset):
                 for file in files:
                     if file.endswith(('.mp4', '.avi', '.mov', '.mkv')):
                         path = os.path.join(root, file)
-                        video_paths.append({
-                            "path": path,
-                            "label": os.path.basename(os.path.dirname(path))
-                        })
+                        video_path_tuples.append(
+                            (path, {"label": os.path.basename(os.path.dirname(path))})
+                        )
         else:
             # Assume it's a text file with paths
             with open(self.config.path, 'r') as f:
@@ -197,13 +195,12 @@ class MemoryEfficientVideoDataset(Dataset):
                         parts = line.split()
                         path = parts[0]
                         label = parts[1] if len(parts) > 1 else "unknown"
-                        video_paths.append({
-                            "path": path,
-                            "label": label
-                        })
+                        video_path_tuples.append(
+                            (path, {"label": label})
+                        )
         
-        logger.info(f"Found {len(video_paths)} videos")
-        return video_paths
+        logger.info(f"Found {len(video_path_tuples)} videos")
+        return video_path_tuples
     
     def _create_clip_sampler(self) -> ClipSampler:
         """Create clip sampler based on configuration."""
@@ -301,15 +298,16 @@ class MemoryEfficientVideoDataset(Dataset):
     
     def __len__(self) -> int:
         """Get dataset length."""
-        return len(self.dataset)
+        return len(self.paths)
     
     def __getitem__(self, idx: int) -> torch.Tensor:
         """Get item from dataset."""
         # Check if we have it cached
         if self.config.preload_to_memory:
-            video_path = self.paths[idx]["path"]
-            if video_path in self.video_cache:
-                video = self.video_cache[video_path]
+            # self.paths is now a list of tuples (path_str, info_dict)
+            video_path_str = self.paths[idx][0]
+            if video_path_str in self.video_cache:
+                video = self.video_cache[video_path_str]
                 # Apply transforms
                 if self.transform is not None:
                     video = self.transform(video)
@@ -438,31 +436,53 @@ def create_loader(dataset: Dataset,
     # Get device manager
     device_manager = get_device_manager()
     
-    # Set pin memory device if using M1
-    pin_memory_device = None
-    if optimize_for_m1 and device_manager.device_str == "mps":
-        pin_memory_device = "mps"
-    
-    # Determine multiprocessing context - 'fork' is faster but less stable
-    # Only use 'fork' on Unix systems with num_workers > 0
+    actual_num_workers = num_workers # type: ignore
+    actual_pin_memory = pin_memory
+    actual_pin_memory_device = None  # Default to None
+    actual_persistent_workers = persistent_workers
+    actual_prefetch_factor = prefetch_factor
     mp_context = None
-    if num_workers > 0:
+    
+    if optimize_for_m1 and device_manager.device_str == "mps":
+        # This log message was missing in your output, ensure logger for 'src.data.dataset' is configured if you want to see it.
+        logger.info("Applying M1-specific DataLoader optimizations: num_workers=0, pin_memory=False, pin_memory_device=''")
+        actual_num_workers = 0
+        actual_pin_memory = False  # Disable pin_memory with num_workers=0 on MPS
+        actual_pin_memory_device = "" # Ensure it's a string
+    elif device_manager.device_str == "mps" and actual_pin_memory:
+        # If not M1 optimized path but still on MPS and pinning memory
+        actual_pin_memory_device = "mps" # type: ignore
+
+    if actual_num_workers > 0:
+        # persistent_workers and prefetch_factor are relevant if num_workers > 0
+        actual_persistent_workers = persistent_workers
+        actual_prefetch_factor = prefetch_factor
         import multiprocessing
         if hasattr(multiprocessing, 'get_all_start_methods'):
-            if 'fork' in multiprocessing.get_all_start_methods():
+            # Prefer 'fork' on Unix-like systems (not Windows) for speed, if available
+            if 'fork' in multiprocessing.get_all_start_methods() and os.name != 'nt':
                 mp_context = 'fork'
-            else:
+            elif 'spawn' in multiprocessing.get_all_start_methods(): # 'spawn' is safer and cross-platform
                 mp_context = 'spawn'
+            # If neither, PyTorch will use its default.
+    else:  # actual_num_workers is 0
+        actual_persistent_workers = False # persistent_workers requires num_workers > 0
+        actual_prefetch_factor = None     # prefetch_factor is not used if num_workers is 0
+        mp_context = None
+
+    # Ensure pin_memory_device is a string if it's still None (e.g. CUDA path with pin_memory=True)
+    if actual_pin_memory_device is None:
+        actual_pin_memory_device = ""
     
     # Create DataLoader with optimized settings
     return DataLoader(
         dataset,
         batch_size=batch_size,
-        num_workers=num_workers,
-        persistent_workers=persistent_workers and num_workers > 0,
-        pin_memory=pin_memory,
-        pin_memory_device=pin_memory_device,
-        prefetch_factor=prefetch_factor if num_workers > 0 else None,
+        num_workers=actual_num_workers,
+        persistent_workers=actual_persistent_workers,
+        pin_memory=actual_pin_memory,
+        pin_memory_device=actual_pin_memory_device, # Will be None if actual_pin_memory is False
+        prefetch_factor=actual_prefetch_factor,
         multiprocessing_context=mp_context,
         drop_last=drop_last
     )
