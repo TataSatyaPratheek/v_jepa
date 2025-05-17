@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class VideoDatasetConfig:
     """Configuration for video dataset."""
-    path: str
+    path: str = "data/videos"  # Make path optional with a default value
     clip_duration: float = 2.0  # seconds
     frame_rate: float = 16.0  # fps
     clip_sampler: str = "random"  # "random", "uniform", or "constant_clips_per_video"

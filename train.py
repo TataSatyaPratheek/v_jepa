@@ -75,8 +75,23 @@ def load_config(args) -> VJEPASystemConfig:
     Returns:
         System configuration
     """
-    # Start with default configuration
-    config = get_default_config()
+    # Start with default configuration but provide path
+    try:
+        config = get_default_config()
+        # Set the path immediately
+        config.dataset.path = args.data_path or "data/videos"
+    except TypeError:
+        # If the above fails, try an alternative approach
+        # Create minimal config first
+        from src.data.dataset import VideoDatasetConfig
+        from src.config.defaults import VJEPASystemConfig
+        
+        # Create the dataset config with path
+        dataset_config = VideoDatasetConfig(path=args.data_path or "data/videos")
+        
+        # Create system config with dataset config
+        config = VJEPASystemConfig()
+        config.dataset = dataset_config
     
     # Load configuration from file if provided
     if args.config and os.path.exists(args.config):

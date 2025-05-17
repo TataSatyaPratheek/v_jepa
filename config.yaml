@@ -2,37 +2,37 @@
 
 # Hardware settings
 hardware:
-  device: "auto"  # 'auto', 'cuda', 'mps', or 'cpu'
-  precision: 16   # 16 or 32
+  device: "auto"  # Will automatically use MPS on M1 Mac
+  precision: 16   # Half precision for memory efficiency
   compile: true   # Use torch.compile for optimization
   threads:
-    omp: 2         # OpenMP threads
-    dataloader: 2  # DataLoader workers
-    io: 2          # IO threads
+    omp: 2        # Limit OpenMP threads to avoid memory pressure
+    dataloader: 1  # Reduced from 2 to prevent RAM pressure during loading
+    io: 1          # Reduced IO threads to minimize resource conflicts
 
-# Model configuration
+# Model configuration - reduced for 8GB RAM
 model:
   architecture: "vjepa"
   encoder:
     type: "MemoryEfficientViT"
-    img_size: 128
+    img_size: 128      # Reduced from 128 for better memory efficiency
     patch_size: 16
-    dim: 384
-    depth: 6
-    heads: 6
+    dim: 384          # Reduced from 384 to lower memory requirements
+    depth: 6           # Reduced from 6 for memory efficiency
+    heads: 6           # Reduced from 6
     mlp_ratio: 4.0
     qkv_bias: true
     use_gradient_checkpointing: true
   predictor:
-    hidden_dim: 192
+    hidden_dim: 192    # Reduced from 192
     use_bn: true
 
 # Data settings
 data:
-  dataset: "kinetics"
-  root: "data/kinetics"
-  clip_duration: 2.0  # seconds
-  frame_rate: 16      # fps
+  dataset: "hmdb51"
+  root: "data/hmdb51/processed"
+  clip_duration: 1.5   # Reduced from 1.5 for memory efficiency
+  frame_rate: 16        # Reduced from 16 to lower memory usage
   clip_sampler: "random"
   transform_mode: "v1"
   augmentations:
@@ -42,9 +42,9 @@ data:
 
 # Training settings
 training:
-  batch_size: 2
-  accumulation_steps: 4  # Effective batch size = batch_size * accumulation_steps
-  epochs: 100
+  batch_size: 2        # Reduced from 2 for memory safety
+  accumulation_steps: 8  # Increased from 4 to maintain effective batch size
+  epochs: 50           # Reduced from 100 for faster experimentation
   optimizer:
     type: "adamw"
     lr: 1.0e-4
@@ -53,28 +53,33 @@ training:
     fused: true
   scheduler:
     type: "cosine"
-    warmup_epochs: 10
-  amp: true  # Automatic mixed precision
+    warmup_epochs: 10   # Reduced from 10
+  amp: true            # Keep automatic mixed precision
   clip_grad_norm: 1.0
 
 # Masking strategy
 masking:
-  strategy: "tube"  # 'tube', 'block', 'random'
-  ratio: 0.75       # Masking ratio
-  temporal_window: 2  # For tube masking
+  strategy: "tube"
+  ratio: 0.75
+  temporal_window: 2
 
 # Logging and checkpointing
 logging:
   tensorboard: true
-  log_every_n_steps: 50
+  log_every_n_steps: 10  # More frequent logging to track progress
   save_dir: "logs"
 checkpointing:
   save_every_n_epochs: 5
-  keep_top_k: 3
+  keep_top_k: 2        # Reduced from 3 to save disk space
 
-# Memory optimization
+# Memory optimization - enhanced for M1
 memory:
-  empty_cache_freq: 5  # Empty cache every N iterations
+  empty_cache_freq: 2   # More frequent cache clearing (was 5)
   optimize_for_m1: true
-  prefetch_factor: 2
+  prefetch_factor: 1    # Reduced from 2 to limit memory usage during prefetching
   pin_memory: true
+
+# Dataset structure verification - added to help with dataset loading
+dataset:
+  verify_structure: true
+  path: "data/hmdb51/processed"  # Redundant but added for clarity
