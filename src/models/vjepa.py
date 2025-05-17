@@ -3,6 +3,9 @@ from torch import nn
 import torch.nn.functional as F
 from typing import Dict, Any, Optional, List, Tuple, Union, Callable
 from dataclasses import dataclass
+import logging
+
+logger = logging.getLogger(__name__)
 
 from .encoders import EncoderConfig, create_encoder, MemoryEfficientViT
 from .predictors import PredictorConfig, create_predictor
@@ -218,7 +221,15 @@ class VJEPA(nn.Module):
         if mask is not None and self.config.use_mask_weighting:
             # Ensure mask has same shape as loss
             if mask.shape != loss.shape:
-                mask = mask.reshape(loss.shape)
+                # This should ideally not happen if VideoMasker produces the correct shape
+                logger.warning(f"Mask shape {mask.shape} differs from loss shape {loss.shape}. Attempting reshape.")
+                try:
+                    mask = mask.reshape(loss.shape)
+                except RuntimeError as e:
+                    logger.error(f"Failed to reshape mask ({mask.shape}, {mask.numel()} elements) to loss shape ({loss.shape}, {loss.numel()} elements). Error: {e}")
+                    # Fallback: use unweighted loss or raise error
+                    loss = loss.mean() # Or re-raise e
+                    return loss 
             
             # Apply mask weighting (focus on masked tokens)
             inverse_mask = 1.0 - mask  # Invert to focus on masked tokens

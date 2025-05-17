@@ -18,6 +18,7 @@ masking:
   block_size: 2
   mask_on_token: true
   mask_ratio: 0.75
+  patch_size: 16
   shared_masking: true
   strategy: tube
   temporal_window: 2

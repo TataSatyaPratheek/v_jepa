@@ -12,9 +12,9 @@ class MaskingConfig:
     mask_ratio: float = 0.75  # Ratio of tokens to mask
     temporal_window: int = 2  # For temporal tube masking
     block_size: int = 2  # For block masking
-    mask_on_token: bool = True  # If True, mask on token level, else on patch level
+    mask_on_token: bool = True  # If True, mask on token level (patches for ViT)
     shared_masking: bool = True  # If True, use same mask for all samples in batch
-
+    patch_size: int = 16 # Patch size, needed for token-level masking of videos
 
 class VideoMasker:
     """
@@ -125,48 +125,54 @@ class VideoMasker:
         is_video = len(x.shape) == 5
         if is_video:
             B, C, T, H, W = x.shape
+            P = self.config.patch_size
+            if H % P != 0 or W % P != 0:
+                raise ValueError(f"Image dimensions ({H}x{W}) must be divisible by patch size ({P}).")
             
-            # For tube masking, we need spatial dimensions
-            spatial_tokens = H * W
-            tokens_per_frame = spatial_tokens
+            num_patches_h = H // P
+            num_patches_w = W // P
+            spatial_tokens_patches = num_patches_h * num_patches_w # Number of patches per frame
             
-            # Create mask for spatial tokens
-            keep_num = int(tokens_per_frame * (1 - self.config.mask_ratio))
+            # Create mask for spatial patches
+            keep_num_spatial_patches = int(spatial_tokens_patches * (1 - self.config.mask_ratio))
             
             # Generate spatial noise (same for all temporal frames)
             if self.config.shared_masking:
                 # Same mask for all samples in batch
-                noise = torch.rand(1, tokens_per_frame, device=x.device)
-                noise = noise.expand(B, -1)  # [B, H*W]
+                noise = torch.rand(1, spatial_tokens_patches, device=x.device)
+                noise = noise.expand(B, -1)  # [B, num_spatial_patches]
             else:
                 # Different mask for each sample
-                noise = torch.rand(B, tokens_per_frame, device=x.device)  # [B, H*W]
+                noise = torch.rand(B, spatial_tokens_patches, device=x.device)  # [B, num_spatial_patches]
                 
             # Get keep indices for spatial dimension
             ids_shuffle = torch.argsort(noise, dim=1)
-            ids_keep = ids_shuffle[:, :keep_num]
+            ids_keep_spatial_patches = ids_shuffle[:, :keep_num_spatial_patches]
             
             # Create spatial binary mask (1=keep, 0=mask)
-            spatial_mask = torch.zeros(B, tokens_per_frame, device=x.device)
-            spatial_mask.scatter_(1, ids_keep, 1)
+            # This is a mask for patches in a single frame
+            spatial_patch_mask = torch.zeros(B, spatial_tokens_patches, device=x.device)
+            spatial_patch_mask.scatter_(1, ids_keep_spatial_patches, 1)
             
             # Expand mask temporally
-            mask = spatial_mask.unsqueeze(1).expand(-1, T, -1).reshape(B, T*tokens_per_frame)
+            # This `token_mask_final` is the mask to be returned and used in loss calculation
+            token_mask_final = spatial_patch_mask.unsqueeze(1).expand(-1, T, -1).reshape(B, T*spatial_tokens_patches)
             
             # Apply mask to video
             x_masked = x.clone()
-            
-            # Apply spatial masking for each frame
             for b in range(B):
+                # Get the spatial patch mask for the current batch item, reshaped to 2D patch grid
+                current_spatial_patch_mask_2d = spatial_patch_mask[b].reshape(num_patches_h, num_patches_w)
                 for t in range(T):
-                    # Reshape mask for this frame
-                    frame_mask = spatial_mask[b].reshape(H, W)
-                    
-                    # Zero out masked regions
-                    x_masked[b, :, t, frame_mask == 0] = 0
+                    for ph_idx in range(num_patches_h):
+                        for pw_idx in range(num_patches_w):
+                            if current_spatial_patch_mask_2d[ph_idx, pw_idx] == 0: # If patch is masked (0 means mask)
+                                r_start, r_end = ph_idx * P, (ph_idx + 1) * P
+                                c_start, c_end = pw_idx * P, (pw_idx + 1) * P
+                                x_masked[b, :, t, r_start:r_end, c_start:c_end] = 0.0
             
             # Return masked video and flattened mask
-            return x_masked, mask
+            return x_masked, token_mask_final
         else:
             # For token representation, we need to know T, H, W to apply tube masking
             # For simplicity, assuming tokens are arranged as [B, T*H*W, D]
@@ -270,7 +276,7 @@ class VideoMasker:
         x_masked = x.clone()
         for b in range(B):
             x_masked[b, :, mask[b] == 0] = 0
-        
+        # The mask here is pixel-level, needs to be patch-level for consistency
         # Flatten mask for return
         flat_mask = mask.reshape(B, -1)
         

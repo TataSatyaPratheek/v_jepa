@@ -5,6 +5,7 @@ import logging
 import argparse
 from typing import Dict, Any, Optional, Tuple, List
 from pathlib import Path
+from dataclasses import asdict # Added import
 import yaml
 import json
 import numpy as np
@@ -145,6 +146,14 @@ def load_config(args) -> VJEPASystemConfig:
     config.training.checkpoint_dir = os.path.join(args.output_dir, 'checkpoints', config.training.experiment_name)
     
     os.makedirs(config.training.log_dir, exist_ok=True)
+    os.makedirs(config.training.checkpoint_dir, exist_ok=True)
+
+    # Ensure masking config has patch_size from encoder_config
+    if hasattr(config.model, 'encoder_config') and config.model.encoder_config is not None:
+        if not hasattr(config, 'masking') or config.masking is None:
+            from src.data.masking import MaskingConfig
+            config.masking = MaskingConfig()
+        config.masking.patch_size = config.model.encoder_config.patch_size
     os.makedirs(config.training.checkpoint_dir, exist_ok=True)
     
     # Save configuration
@@ -293,18 +302,12 @@ def train_epoch(model: VJEPA,
         if isinstance(batch, torch.Tensor):
             batch = batch.to(device, non_blocking=True)
         
-        # Apply masking
-        masked_batch = apply_masking(batch, config.masking)
-        
-        # Generate mask
-        mask = torch.zeros_like(batch, device=device)
-        mask[masked_batch > 0] = 1
-        mask = mask.sum(dim=1).bool().float()  # [B, H, W]
-        mask = mask.flatten(1)  # [B, H*W]
+        # Apply masking (mask_generator is VideoMasker instance)
+        masked_batch, token_mask = mask_generator(batch) # token_mask is patch-level
         
         # Forward pass
         with amp_context:
-            outputs = model(batch, masked_batch, mask)
+            outputs = model(batch, masked_batch, token_mask)
             loss = outputs["loss"]
         
         # Backward pass with gradient accumulation
@@ -419,18 +422,12 @@ def validate(model: VJEPA,
             if isinstance(batch, torch.Tensor):
                 batch = batch.to(device, non_blocking=True)
             
-            # Apply masking
-            masked_batch = apply_masking(batch, config.masking)
-            
-            # Generate mask
-            mask = torch.zeros_like(batch, device=device)
-            mask[masked_batch > 0] = 1
-            mask = mask.sum(dim=1).bool().float()  # [B, H, W]
-            mask = mask.flatten(1)  # [B, H*W]
+            # Apply masking (mask_generator is VideoMasker instance)
+            masked_batch, token_mask = mask_generator(batch) # token_mask is patch-level
             
             # Forward pass
             with amp_context:
-                outputs = model(batch, masked_batch, mask)
+                outputs = model(batch, masked_batch, token_mask)
                 loss = outputs["loss"]
             
             # Update metrics
