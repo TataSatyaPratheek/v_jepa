@@ -1,0 +1,80 @@
+# V-JEPA Configuration
+
+# Hardware settings
+hardware:
+  device: "auto"  # 'auto', 'cuda', 'mps', or 'cpu'
+  precision: 16   # 16 or 32
+  compile: true   # Use torch.compile for optimization
+  threads:
+    omp: 2         # OpenMP threads
+    dataloader: 2  # DataLoader workers
+    io: 2          # IO threads
+
+# Model configuration
+model:
+  architecture: "vjepa"
+  encoder:
+    type: "MemoryEfficientViT"
+    img_size: 128
+    patch_size: 16
+    dim: 384
+    depth: 6
+    heads: 6
+    mlp_ratio: 4.0
+    qkv_bias: true
+    use_gradient_checkpointing: true
+  predictor:
+    hidden_dim: 192
+    use_bn: true
+
+# Data settings
+data:
+  dataset: "kinetics"
+  root: "data/kinetics"
+  clip_duration: 2.0  # seconds
+  frame_rate: 16      # fps
+  clip_sampler: "random"
+  transform_mode: "v1"
+  augmentations:
+    random_crop: true
+    random_flip: true
+    color_jitter: true
+
+# Training settings
+training:
+  batch_size: 2
+  accumulation_steps: 4  # Effective batch size = batch_size * accumulation_steps
+  epochs: 100
+  optimizer:
+    type: "adamw"
+    lr: 1.0e-4
+    weight_decay: 0.05
+    betas: [0.9, 0.95]
+    fused: true
+  scheduler:
+    type: "cosine"
+    warmup_epochs: 10
+  amp: true  # Automatic mixed precision
+  clip_grad_norm: 1.0
+
+# Masking strategy
+masking:
+  strategy: "tube"  # 'tube', 'block', 'random'
+  ratio: 0.75       # Masking ratio
+  temporal_window: 2  # For tube masking
+
+# Logging and checkpointing
+logging:
+  tensorboard: true
+  log_every_n_steps: 50
+  save_dir: "logs"
+checkpointing:
+  save_every_n_epochs: 5
+  keep_top_k: 3
+
+# Memory optimization
+memory:
+  empty_cache_freq: 5  # Empty cache every N iterations
+  optimize_for_m1: true
+  prefetch_factor: 2
+  pin_memory: true
