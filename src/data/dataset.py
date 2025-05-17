@@ -2,6 +2,7 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 import numpy as np
+import gc
 import os
 import math
 from typing import List, Dict, Tuple, Optional, Callable, Union, Any
@@ -199,11 +200,17 @@ class MemoryEfficientVideoDataset(Dataset):
         else:
             logger.info("PyTorchVideo is not available. Using fallback _load_video_directly for all items.")
             # self.dataset is already None, which is correct
-        
+
+        # Pre-load all items from PyTorchVideo dataset for random access
+        self.dataset_items = []
+                
         # Set up memory cache if preloading
         self.video_cache = {}
         if config.preload_to_memory:
             self._preload_videos()
+        
+        # Pre-load PyTorchVideo items for faster random access if dataset is available
+        self._preload_pytorchvideo_items()
     
     def _get_video_paths(self) -> List[Tuple[str, Dict]]:
         """Get list of video paths."""
@@ -216,8 +223,10 @@ class MemoryEfficientVideoDataset(Dataset):
                 for file in files:
                     if file.endswith(('.mp4', '.avi', '.mov', '.mkv')):
                         path = os.path.join(root, file)
+                        label = os.path.basename(os.path.dirname(path))
+                        # Include video_path in metadata for compatibility with PyTorchVideo
                         video_path_tuples.append(
-                            (path, {"label": os.path.basename(os.path.dirname(path))})
+                            (path, {"label": label, "video_path": path})
                         )
         else:
             # Assume it's a text file with paths
@@ -234,6 +243,25 @@ class MemoryEfficientVideoDataset(Dataset):
         
         logger.info(f"Found {len(video_path_tuples)} videos")
         return video_path_tuples
+    
+    def _preload_pytorchvideo_items(self):
+        """Pre-load all items from PyTorchVideo dataset for random access."""
+        if self.dataset is not None:
+            try:
+                logger.info("Pre-loading items from PyTorchVideo dataset (optimized for M1)...")
+                # Process items in smaller batches to avoid memory pressure
+                self.dataset_items = []
+                batch_size = 10  # Process 10 items at a time
+                dataset_iter = iter(self.dataset)
+                try:
+                    while True:
+                        self.dataset_items.extend([next(dataset_iter) for _ in range(batch_size)])
+                        empty_cache()  # Clear cache after each batch
+                except StopIteration:
+                    logger.info(f"Pre-loaded {len(self.dataset_items)} items from PyTorchVideo dataset")
+            except Exception as e:
+                logger.error(f"Error pre-loading items from PyTorchVideo dataset: {e}. Will use fallback loading.")
+                self.dataset_items = []
     
     def _create_clip_sampler(self) -> ClipSampler:
         """Create clip sampler based on configuration."""
@@ -328,6 +356,12 @@ class MemoryEfficientVideoDataset(Dataset):
         loader.stop()
         
         logger.info(f"Preloaded {len(self.video_cache)} videos to memory")
+
+        # Force garbage collection before preloading PyTorchVideo items
+        gc.collect()
+        empty_cache()
+        self._preload_pytorchvideo_items()
+
     
     def __len__(self) -> int:
         """Get dataset length."""
@@ -346,13 +380,27 @@ class MemoryEfficientVideoDataset(Dataset):
                     video = self.transform(video)
                 return video
         
-        # Otherwise get from pytorchvideo dataset
-        if self.dataset is not None:
+        # Try to use pre-loaded items if available
+        if len(self.dataset_items) > idx:
+            # Get item from preloaded cache
+            item = self.dataset_items[idx]
+            
+            # Apply transforms if needed
+            if self.transform is not None and 'video' in item:
+                item['video'] = self.transform(item['video'])
+            
+            return item
+        # Otherwise try to get from pytorchvideo dataset directly (this path may fail)
+        elif self.dataset is not None:
             try:
-                return self.dataset[idx]
+                # This might be slow if LabeledVideoDataset is an IterableDataset and not a MapDataset
+                # Try direct indexing (may not work with IterableDataset)
+                item = self.dataset[idx]
+                return item
             except Exception as e:
                 logger.error(f"Error accessing dataset at index {idx}: {e}")
-                # Fall back to direct loading
+                # Fall back to direct loading - clear memory first
+                empty_cache()
                 return self._load_video_directly(idx)
         else:
             # If dataset initialization failed, load video directly
@@ -361,6 +409,8 @@ class MemoryEfficientVideoDataset(Dataset):
     def _load_video_directly(self, idx: int) -> torch.Tensor:
         """Fallback to load video directly using PyAV if PyTorchVideo fails or is unavailable."""
         video_path_str = self.paths[idx][0] # self.paths stores tuples of (path_str, info_dict)
+        # Clear memory before loading
+        empty_cache()
         logger.info(f"Directly loading video from {video_path_str} using PyAV fallback.")
 
         try:
@@ -567,6 +617,10 @@ def create_loader(dataset: Dataset,
     actual_pin_memory_device = None  # Default to None
     actual_persistent_workers = persistent_workers
     actual_prefetch_factor = prefetch_factor
+    # For M1 with limited memory, further restrict the settings
+    if optimize_for_m1:
+        actual_prefetch_factor = min(prefetch_factor, 1)  # Limit prefetch factor to reduce memory pressure
+        drop_last = True  # Drop last incomplete batch for consistent memory usage
     mp_context = None
     
     if optimize_for_m1 and device_manager.device_str == "mps":

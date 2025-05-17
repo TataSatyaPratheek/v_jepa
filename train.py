@@ -271,7 +271,7 @@ def train_epoch(model: VJEPA,
     progress_display = TrainingProgressDisplay(
         total_epochs=config.training.epochs,
         steps_per_epoch=len(loader),
-        metrics=['loss', 'lr', 'memory_mb'],
+        metrics=['loss', 'lr', 'memory_mb', 'data_t_val', 'batch_t_val'],
         use_rich=True  # Use Rich for fancy display
     )
     progress_display.start()
@@ -316,6 +316,9 @@ def train_epoch(model: VJEPA,
         # Update weights if accumulation is complete
         if not grad_accumulator.is_accumulation_step:
             grad_accumulator.step()
+            # Force memory cleanup after every backward+update
+            torch.cuda.empty_cache() if torch.cuda.is_available() else None
+            empty_cache(force_gc=True)
             grad_accumulator.zero_grad(set_to_none=True)
         
         # Update metrics
@@ -324,7 +327,7 @@ def train_epoch(model: VJEPA,
         
         # Empty cache if configured
         if i % config.training.empty_cache_freq == 0:
-            empty_cache()
+            empty_cache(force_gc=True)  # Force garbage collection more aggressively
         
         # Update memory monitor
         memory_info = memory_monitor.update()
@@ -334,7 +337,9 @@ def train_epoch(model: VJEPA,
         metrics = {
             'loss': loss.item(),
             'lr': current_lr,
-            'memory_mb': memory_mb
+            'memory_mb': memory_mb,
+            'data_t_val': data_time.val,
+            'batch_t_val': batch_time.val
         }
         progress_display.update_display(epoch, i+1, metrics)
         
@@ -398,7 +403,7 @@ def validate(model: VJEPA,
     progress_display = TrainingProgressDisplay(
         total_epochs=1,  # Just one validation pass
         steps_per_epoch=len(loader),
-        metrics=['val_loss'],
+        metrics=['val_loss', 'batch_t_val'],
         use_rich=True  # Use Rich for fancy display
     )
     progress_display.start()
@@ -436,7 +441,8 @@ def validate(model: VJEPA,
             
             # Update progress display
             metrics = {
-                'val_loss': loss.item()
+                'val_loss': loss.item(),
+                'batch_t_val': batch_time.val
             }
             progress_display.update_display(1, i+1, metrics)
             

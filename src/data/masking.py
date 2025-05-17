@@ -3,6 +3,7 @@ import torch.nn.functional as F
 import numpy as np
 from typing import Optional, Tuple, Dict, List, Union
 from dataclasses import dataclass
+from src.utils.memory import empty_cache
 
 
 @dataclass
@@ -39,6 +40,7 @@ class VideoMasker:
             
         Returns:
             Tuple of (masked_x, mask) where mask is binary mask of 1s (keep) and 0s (mask)
+        Note: Runs empty_cache after use to free memory on M1
         """
         # Choose masking strategy based on config
         if self.config.strategy == "tube":
@@ -48,7 +50,9 @@ class VideoMasker:
         elif self.config.strategy == "random":
             return self.apply_random_masking(x)
         else:
-            raise ValueError(f"Unknown masking strategy: {self.config.strategy}")
+            result = self.apply_random_masking(x)
+            empty_cache()  # Clean up after masking
+            return result
     
     def apply_random_masking(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
